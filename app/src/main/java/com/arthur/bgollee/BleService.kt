@@ -1,12 +1,14 @@
 package com.arthur.bgollee
 
 import android.app.*
+import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.content.*
 import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.util.*
+import kotlin.math.abs
 
 class BleService : Service() {
 
@@ -23,16 +25,48 @@ class BleService : Service() {
 
     private var lastSent: String? = null
     private var isInErrorState = false
+    private var weekdayHeader: ByteArray? = null
+    private var isAwaitingWeekdayHeader = false
+    private var incomingFrameBytes = ByteArray(0)
+    private var writeInFlight = false
+    private var writeRetryCount = 0
+    private val writeQueue = ArrayDeque<ByteArray>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val weekdayHeaderTimeout = Runnable {
+        if (isAwaitingWeekdayHeader) {
+            isAwaitingWeekdayHeader = false
+            log("World Time header read timed out; skipping upper-field update")
+            trySend()
+        }
+    }
 
     companion object {
         const val CHANNEL_ID = "ble_service_channel"
         private const val STALE_MS = 6 * 60 * 1000L
+        private const val WRITE_CHUNK_SIZE = 20
+        private const val WRITE_RETRY_MS = 100L
+        private const val MAX_WRITE_RETRIES = 40
+        private const val WEEKDAY_TARGET = 0x34
+        private const val WEEKDAY_READ_TARGET = 0x35
+        private const val WEEKDAY_REPLY_TARGET = 0x55
+        private const val RESPONSE_TARGET_OFFSET = 0x20
+        private const val WEEKDAY_HEADER_SIZE = 4
+        private const val WEEKDAY_TABLE_SIZE = 14
+        private const val WEEKDAY_HEADER_TIMEOUT_MS = 5_000L
+        private val DEFAULT_WEEKDAYS = "MOTUWETHFRSASU".toByteArray(Charsets.US_ASCII)
 
         val SERVICE_UUID =
             UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
 
         val CHAR_UUID =
             UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
+
+        private val NOTIFY_CHAR_UUID =
+            UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
+
+        private val CCCD_UUID =
+            UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }
 
     // ========================
@@ -67,7 +101,8 @@ class BleService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
 
         val bg = intent?.getStringExtra("bg")
-        val trend = intent?.getStringExtra("trend")
+        val delta = intent?.getIntExtra("delta", Int.MIN_VALUE)
+            ?.takeIf { it != Int.MIN_VALUE }
 
         intent?.getStringExtra("device_address")?.let {
             deviceAddress = it
@@ -75,7 +110,7 @@ class BleService : Service() {
         }
 
         if (bg != null) {
-            handleBg(bg, trend)
+            handleBg(bg, delta)
         }
 
         if (gatt == null && !isConnecting) {
@@ -89,26 +124,26 @@ class BleService : Service() {
     // GESTION BG
     // ========================
 
-    private fun handleBg(bg: String, trend: String?) {
+    private fun handleBg(bg: String, delta: Int?) {
 
         val now = System.currentTimeMillis()
 
-        val formatted = formatBg(bg, trend)
+        val formatted = formatBg(bg, delta)
 
         pendingBg = formatted
         isInErrorState = false
 
         prefs.edit()
-            .putString("last_bg", formatted.trim())
+            .putString("last_watch", formatted.trim())
             .putLong("last_time", now)
             .apply()
 
-        sendBroadcast(Intent("BG_UPDATED"))
+        sendBroadcast(Intent("BG_UPDATED").setPackage(packageName))
 
         trySend()
     }
 
-    private fun formatBg(bg: String?, trend: String?): String {
+    private fun formatBg(bg: String?, delta: Int?): String {
 
         if (bg.isNullOrBlank()) return "Err   "
 
@@ -125,17 +160,26 @@ class BleService : Service() {
             mgdl.coerceIn(0, 999).toString()
         }
 
-        val arrow = when (trend) {
-            "UP" -> "+"
-            "DOWN" -> "-"
-            "FLAT" -> " "
-            else -> " "
-        }
+        val deltaText = delta?.let {
+            val boundedDelta = it.coerceIn(-99, 99)
+            if (isMmol) {
+                val magnitude = String.format(Locale.US, "%.1f", abs(boundedDelta) / 18.0)
+                when {
+                    boundedDelta > 0 -> "+$magnitude"
+                    boundedDelta < 0 -> "-$magnitude"
+                    else -> magnitude
+                }
+            } else {
+                val magnitude = abs(boundedDelta).toString().padStart(2, '0')
+                when {
+                    boundedDelta > 0 -> "+$magnitude"
+                    boundedDelta < 0 -> "-$magnitude"
+                    else -> magnitude
+                }
+            }
+        } ?: "--"
 
-        // valeur alignée à gauche sur 5 caractères (grands chiffres), flèche en dernier (petit caractère)
-        val valueAligned = valueStr.take(5).padEnd(5, ' ')
-
-        return (valueAligned + arrow).take(6)
+        return (valueStr + deltaText).take(6)
     }
 
     // ========================
@@ -192,6 +236,7 @@ class BleService : Service() {
                         log("🔴 Bluetooth OFF")
                         isConnected = false
                         servicesReady = false
+                        clearPendingWrites()
                         gatt?.close()
                         gatt = null
                     }
@@ -222,6 +267,9 @@ class BleService : Service() {
         log("🔗 Connexion à $addr")
 
         isConnecting = true
+        weekdayHeader = null
+        lastSent = null
+        incomingFrameBytes = ByteArray(0)
 
         gatt = device.connectGatt(
             this,
@@ -231,6 +279,7 @@ class BleService : Service() {
         )
     }
 
+    @SuppressLint("MissingPermission")
     private val gattCallback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
@@ -251,6 +300,10 @@ class BleService : Service() {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 isConnected = false
                 servicesReady = false
+                clearPendingWrites()
+                weekdayHeader = null
+                isAwaitingWeekdayHeader = false
+                mainHandler.removeCallbacks(weekdayHeaderTimeout)
 
                 gatt?.close()
                 gatt = null
@@ -264,11 +317,89 @@ class BleService : Service() {
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            servicesReady = true
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                log("Service discovery failed: $status")
+                return
+            }
 
-            Handler(Looper.getMainLooper()).postDelayed({
+            val service = g.getService(SERVICE_UUID)
+            val notifyCharacteristic = service?.getCharacteristic(NOTIFY_CHAR_UUID)
+            val descriptor = notifyCharacteristic?.getDescriptor(CCCD_UUID)
+            if (notifyCharacteristic == null || descriptor == null) {
+                log("Notify characteristic unavailable; upper-field updates disabled")
+                servicesReady = true
                 trySend()
-            }, 1000)
+                return
+            }
+
+            g.setCharacteristicNotification(notifyCharacteristic, true)
+            val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    g.writeDescriptor(descriptor)
+                }
+            }
+            if (!started) {
+                log("Failed to enable watch notifications; upper-field updates disabled")
+                servicesReady = true
+                trySend()
+            }
+        }
+
+        override fun onDescriptorWrite(
+            g: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            if (descriptor.uuid != CCCD_UUID) return
+            servicesReady = true
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                requestWeekdayHeader()
+            } else {
+                log("Failed to enable watch notifications: $status")
+                trySend()
+            }
+        }
+
+        override fun onCharacteristicWrite(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            if (characteristic.uuid != CHAR_UUID) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                log("BLE write failed: $status")
+                clearPendingWrites()
+                return
+            }
+            writeQueue.pollFirst()
+            writeInFlight = false
+            writeRetryCount = 0
+            pumpWriteQueue()
+        }
+
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            if (characteristic.uuid == NOTIFY_CHAR_UUID) {
+                receiveNotification(characteristic.value ?: return)
+            }
+        }
+
+        override fun onCharacteristicChanged(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            if (characteristic.uuid == NOTIFY_CHAR_UUID) {
+                receiveNotification(value)
+            }
         }
     }
 
@@ -282,42 +413,129 @@ class BleService : Service() {
 
         if (!isConnected || !servicesReady) return
 
-        if (bg == lastSent) return
+        if (bg != lastSent) {
+            sendToWatch(bg)
+            lastSent = bg
+            pendingBg = null
+        }
 
-        sendToWatch(bg)
-
-        lastSent = bg
-        pendingBg = null
     }
 
     private fun sendToWatch(bg: String) {
 
-        val g = gatt ?: return
+        enqueuePacket(buildFrame(0x2f, bg.toByteArray(Charsets.US_ASCII)))
+        log("📤 Envoyé → '$bg'")
+    }
 
-        val service = g.getService(SERVICE_UUID) ?: return
-        val charac = service.getCharacteristic(CHAR_UUID) ?: return
+    private fun requestWeekdayHeader() {
+        isAwaitingWeekdayHeader = true
+        enqueuePacket(buildFrame(WEEKDAY_READ_TARGET, ByteArray(0)))
+        mainHandler.removeCallbacks(weekdayHeaderTimeout)
+        mainHandler.postDelayed(weekdayHeaderTimeout, WEEKDAY_HEADER_TIMEOUT_MS)
+    }
 
-        val payload = byteArrayOf(
-            0x02, 0x2f
-        ) + bg.toByteArray(Charsets.US_ASCII)
-
-        val crc = crc16(payload)
-
-        val packet = byteArrayOf(
+    private fun buildFrame(target: Int, payload: ByteArray): ByteArray {
+        val inner = byteArrayOf(0x02, target.toByte()) + payload
+        val crc = crc16(inner)
+        return byteArrayOf(
             0x00,
-            (payload.size + 4).toByte(),
+            (inner.size + 4).toByte(),
             0xaa.toByte(),
             0x55,
             (crc shr 8).toByte(),
             (crc and 0xFF).toByte()
-        ) + payload
+        ) + inner
+    }
 
-        charac.value = packet
-        charac.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+    private fun enqueuePacket(packet: ByteArray) {
+        packet.toList().chunked(WRITE_CHUNK_SIZE).forEach { chunk ->
+            writeQueue.addLast(chunk.toByteArray())
+        }
+        pumpWriteQueue()
+    }
 
-        g.writeCharacteristic(charac)
+    @SuppressLint("MissingPermission")
+    private fun pumpWriteQueue() {
+        if (!isConnected || !servicesReady || writeInFlight) return
 
-        log("📤 Envoyé → '$bg'")
+        val bytes = writeQueue.peekFirst() ?: return
+        val characteristic = gatt?.getService(SERVICE_UUID)?.getCharacteristic(CHAR_UUID) ?: return
+        val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt?.writeCharacteristic(
+                characteristic,
+                bytes,
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            ) == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            run {
+                characteristic.value = bytes
+                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                gatt?.writeCharacteristic(characteristic) == true
+            }
+        }
+
+        if (started) {
+            writeInFlight = true
+            writeRetryCount = 0
+        } else if (++writeRetryCount >= MAX_WRITE_RETRIES) {
+            log("BLE write queue stalled; dropping pending packet fragments")
+            clearPendingWrites()
+        } else {
+            mainHandler.postDelayed({ pumpWriteQueue() }, WRITE_RETRY_MS)
+        }
+    }
+
+    private fun clearPendingWrites() {
+        writeQueue.clear()
+        writeInFlight = false
+        writeRetryCount = 0
+    }
+
+    private fun receiveNotification(value: ByteArray) {
+        incomingFrameBytes += value
+
+        while (incomingFrameBytes.size >= 2) {
+            if (incomingFrameBytes[0] != 0x00.toByte()) {
+                incomingFrameBytes = incomingFrameBytes.copyOfRange(1, incomingFrameBytes.size)
+                continue
+            }
+
+            val frameSize = (incomingFrameBytes[1].toInt() and 0xff) + 2
+            if (incomingFrameBytes.size < frameSize) return
+
+            val frame = incomingFrameBytes.copyOfRange(0, frameSize)
+            incomingFrameBytes = incomingFrameBytes.copyOfRange(frameSize, incomingFrameBytes.size)
+            acceptWeekdayHeader(frame)
+        }
+    }
+
+    private fun acceptWeekdayHeader(frame: ByteArray) {
+        if (!isAwaitingWeekdayHeader ||
+            frame.size < 8 + WEEKDAY_HEADER_SIZE + WEEKDAY_TABLE_SIZE
+        ) return
+        if (frame[6] != 0x02.toByte()) return
+        if ((frame[7].toInt() and 0xff) != WEEKDAY_READ_TARGET + RESPONSE_TARGET_OFFSET) return
+
+        val expectedCrc = ((frame[4].toInt() and 0xff) shl 8) or (frame[5].toInt() and 0xff)
+        val actualCrc = crc16(frame.copyOfRange(6, frame.size))
+        if (actualCrc != expectedCrc) {
+            log("Invalid CRC in World Time header response")
+            return
+        }
+
+        weekdayHeader = frame.copyOfRange(8, 8 + WEEKDAY_HEADER_SIZE)
+        val currentWeekdays = frame.copyOfRange(
+            8 + WEEKDAY_HEADER_SIZE,
+            8 + WEEKDAY_HEADER_SIZE + WEEKDAY_TABLE_SIZE
+        )
+        isAwaitingWeekdayHeader = false
+        mainHandler.removeCallbacks(weekdayHeaderTimeout)
+        if (!currentWeekdays.contentEquals(DEFAULT_WEEKDAYS)) {
+            enqueuePacket(buildFrame(WEEKDAY_TARGET, weekdayHeader!! + DEFAULT_WEEKDAYS))
+            log("Restoring weekday labels in the upper field")
+        }
+        trySend()
     }
 
     private fun crc16(data: ByteArray): Int {

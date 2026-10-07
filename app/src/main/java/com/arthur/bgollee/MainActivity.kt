@@ -3,6 +3,7 @@ package com.arthur.bgollee
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.*
+import android.content.res.ColorStateList
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -11,6 +12,7 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.text.SimpleDateFormat
 import java.util.*
 import android.app.AlertDialog
@@ -48,23 +50,36 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        window.statusBarColor = getColor(R.color.app_background)
+        window.navigationBarColor = getColor(R.color.app_background)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(40, 40, 40, 40)
+            setBackgroundColor(getColor(R.color.app_background))
         }
 
         textView = TextView(this).apply {
             textSize = 18f
             gravity = Gravity.CENTER
+            setTextColor(getColor(R.color.app_text))
         }
 
         btnPermission = Button(this).apply {
             text = getString(R.string.permission_button)
+            backgroundTintList = ColorStateList.valueOf(getColor(R.color.app_surface))
+            setTextColor(getColor(R.color.app_text))
         }
 
         btnSelectDevice = Button(this).apply {
             text = getString(R.string.select_device)
+            backgroundTintList = ColorStateList.valueOf(getColor(R.color.app_surface))
+            setTextColor(getColor(R.color.app_text))
         }
 
         layout.addView(textView)
@@ -142,7 +157,29 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("data", MODE_PRIVATE)
 
         val bg = prefs.getString("last_bg", "--")
+        val delta = prefs.getString("last_delta", null)?.toIntOrNull()
+        val trend = prefs.getString("last_trend", "UNKNOWN")
         val time = prefs.getLong("last_time", 0)
+
+        val deltaText = delta?.let {
+            if (bg?.contains(".") == true) {
+                getString(
+                    R.string.delta_mmol,
+                    String.format(Locale.getDefault(), "%+.1f", it / 18.0)
+                )
+            } else {
+                getString(R.string.delta_mgdl, if (it > 0) "+$it" else it.toString())
+            }
+        } ?: "--"
+
+        val trendText = when (trend) {
+            "UP2" -> getString(R.string.trend_fast_rising)
+            "UP" -> getString(R.string.trend_rising)
+            "FLAT" -> getString(R.string.trend_stable)
+            "DOWN" -> getString(R.string.trend_falling)
+            "DOWN2" -> getString(R.string.trend_fast_falling)
+            else -> getString(R.string.trend_unknown)
+        }
 
         val formattedTime =
             if (time != 0L)
@@ -157,6 +194,8 @@ class MainActivity : AppCompatActivity() {
 
         textView.text = """
             🩸 ${getString(R.string.glycemia)}: $bg
+            ${getString(R.string.delta_label)}: $deltaText
+            ${getString(R.string.trend_label)}: $trendText
             ⏱ ${getString(R.string.received_at)}: $formattedTime
             
             🔵 ${getString(R.string.status)}: $statusText
