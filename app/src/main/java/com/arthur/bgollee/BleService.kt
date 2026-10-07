@@ -26,7 +26,7 @@ class BleService : Service() {
 
     companion object {
         const val CHANNEL_ID = "ble_service_channel"
-        private const val TIMEOUT_MS = 15 * 60 * 1000L
+        private const val STALE_MS = 6 * 60 * 1000L
 
         val SERVICE_UUID =
             UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
@@ -132,11 +132,10 @@ class BleService : Service() {
             else -> " "
         }
 
-        // 👉 on met la valeur FULL à droite sur 5 caractères
-        val valueAligned = valueStr.take(5).padStart(5, ' ')
+        // valeur alignée à gauche sur 5 caractères (grands chiffres), flèche en dernier (petit caractère)
+        val valueAligned = valueStr.take(5).padEnd(5, ' ')
 
-        // 👉 1 char flèche + 5 chars valeur = 6 total
-        return (arrow + valueAligned).take(6)
+        return (valueAligned + arrow).take(6)
     }
 
     // ========================
@@ -153,12 +152,15 @@ class BleService : Service() {
                 val lastTime = prefs.getLong("last_time", 0L)
                 val now = System.currentTimeMillis()
 
-                if (now - lastTime > TIMEOUT_MS) {
+                if (lastTime > 0L && now - lastTime >= STALE_MS) {
 
-                    if (!isInErrorState) {
-                        log("⏱ Timeout → ERROR")
+                    val minutes = ((now - lastTime) / 60_000L).toInt().coerceAtMost(99)
+                    val text = "-- " + minutes.toString().padStart(2, ' ') + "m"
 
-                        pendingBg = "Err   "
+                    if (!isInErrorState || text != pendingBg) {
+                        log("⏱ Pas de lecture depuis $minutes min")
+
+                        pendingBg = text
                         isInErrorState = true
 
                         trySend()
