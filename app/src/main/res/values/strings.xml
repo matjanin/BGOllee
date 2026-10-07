@@ -5,6 +5,16 @@
     <string name="no_device" translatable="false">Select a device first</string>
 
     <string name="glycemia" translatable="false">Glucose</string>
+    <string name="delta_label">Delta (5 min)</string>
+    <string name="delta_mgdl">%1$s mg/dL</string>
+    <string name="delta_mmol">%1$s mmol/L</string>
+    <string name="trend_label">Trend</string>
+    <string name="trend_fast_rising">↑↑ Fast rising</string>
+    <string name="trend_rising">↑ Rising</string>
+    <string name="trend_stable">→ Stable</string>
+    <string name="trend_falling">↓ Falling</string>
+    <string name="trend_fast_falling">↓↓ Fast falling</string>
+    <string name="trend_unknown">Unknown</string>
     <string name="received_at" translatable="false">Received at</string>
     <string name="status" translatable="false">Status</string>
 

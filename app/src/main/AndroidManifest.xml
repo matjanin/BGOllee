@@ -15,7 +15,7 @@
     <application
         android:allowBackup="true"
         android:label="BG Ollee"
-        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+        android:theme="@style/Theme.BleTest">
 
         <activity
             android:name="com.arthur.bgollee.MainActivity"
@@ -32,6 +32,7 @@
             <intent-filter>
                 <action android:name="com.eveningoutpost.dexdrip.BgEstimate"/>
                 <action android:name="com.eveningoutpost.dexdrip.BROADCAST"/>
+                <action android:name="com.eveningoutpost.dexdrip.watch.wearintegration.BROADCAST_SERVICE_RECEIVER"/>
             </intent-filter>
         </receiver>
 

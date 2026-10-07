@@ -5,6 +5,16 @@
     <string name="no_device">Choisis une montre</string>
 
     <string name="glycemia">Glycémie</string>
+    <string name="delta_label">Delta (5 min)</string>
+    <string name="delta_mgdl">%1$s mg/dL</string>
+    <string name="delta_mmol">%1$s mmol/L</string>
+    <string name="trend_label">Tendance</string>
+    <string name="trend_fast_rising">↑↑ Hausse rapide</string>
+    <string name="trend_rising">↑ En hausse</string>
+    <string name="trend_stable">→ Stable</string>
+    <string name="trend_falling">↓ En baisse</string>
+    <string name="trend_fast_falling">↓↓ Baisse rapide</string>
+    <string name="trend_unknown">Inconnue</string>
     <string name="received_at">Reçue à</string>
     <string name="status">Statut</string>
 

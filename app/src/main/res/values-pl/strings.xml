@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="permission_button">Poproś o uprawnienia</string>
+    <string name="select_device">Wybierz zegarek</string>
+    <string name="no_device">Najpierw wybierz zegarek</string>
+
+    <string name="glycemia">Glukoza</string>
+    <string name="delta_label">Delta (5 min)</string>
+    <string name="delta_mgdl">%1$s mg/dL</string>
+    <string name="delta_mmol">%1$s mmol/L</string>
+    <string name="trend_label">Trend</string>
+    <string name="trend_fast_rising">↑↑ Szybki wzrost</string>
+    <string name="trend_rising">↑ Wzrost</string>
+    <string name="trend_stable">→ Stabilnie</string>
+    <string name="trend_falling">↓ Spadek</string>
+    <string name="trend_fast_falling">↓↓ Szybki spadek</string>
+    <string name="trend_unknown">Nieznany</string>
+    <string name="received_at">Odebrano o</string>
+    <string name="status">Status</string>
+
+    <string name="inactive">Nieaktywna</string>
+    <string name="last_data">Ostatnie odebrane dane</string>
+</resources>
