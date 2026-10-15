@@ -20,4 +20,6 @@
 
     <string name="inactive" translatable="false">Inactive</string>
     <string name="last_data" translatable="false">Last data received</string>
+    <string name="reconnect" translatable="false">Reconnect to watch</string>
+    <string name="reconnecting" translatable="false">Reconnecting…</string>
 </resources>

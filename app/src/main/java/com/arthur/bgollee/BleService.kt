@@ -32,6 +32,16 @@ class BleService : Service() {
     private var writeRetryCount = 0
     private val writeQueue = ArrayDeque<ByteArray>()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var reconnectAttempts = 0
+
+    private val connectTimeout = Runnable {
+        if (isConnecting && !isConnected) {
+            log("Connection attempt timed out")
+            handleDisconnected()
+        }
+    }
+
+    private val reconnectRunnable = Runnable { connect() }
 
     private val weekdayHeaderTimeout = Runnable {
         if (isAwaitingWeekdayHeader) {
@@ -43,6 +53,11 @@ class BleService : Service() {
 
     companion object {
         const val CHANNEL_ID = "ble_service_channel"
+        const val ACTION_RECONNECT = "com.arthur.bgollee.RECONNECT"
+        const val STATUS_PREF = "ble_status"
+        private const val CONNECT_TIMEOUT_MS = 20_000L
+        private const val RECONNECT_BASE_MS = 2_000L
+        private const val RECONNECT_MAX_MS = 60_000L
         private const val STALE_MS = 6 * 60 * 1000L
         private const val WRITE_CHUNK_SIZE = 20
         private const val WRITE_RETRY_MS = 100L
@@ -95,6 +110,10 @@ class BleService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacks(connectTimeout)
+        mainHandler.removeCallbacks(reconnectRunnable)
+        gatt?.close()
+        gatt = null
         unregisterReceiver(btReceiver)
     }
 
@@ -113,7 +132,11 @@ class BleService : Service() {
             handleBg(bg, delta)
         }
 
-        if (gatt == null && !isConnecting) {
+        if (intent?.action == ACTION_RECONNECT) {
+            log("Manual reconnect requested")
+            reconnectAttempts = 0
+            forceReconnect()
+        } else if (!isConnected && !isConnecting) {
             connect()
         }
 
@@ -211,6 +234,12 @@ class BleService : Service() {
                     }
                 }
 
+                if (!isConnected && !isConnecting && deviceAddress != null &&
+                    !mainHandler.hasCallbacks(reconnectRunnable)
+                ) {
+                    connect()
+                }
+
                 handler.postDelayed(this, 60_000)
             }
         }
@@ -234,11 +263,15 @@ class BleService : Service() {
 
                     BluetoothAdapter.STATE_OFF -> {
                         log("🔴 Bluetooth OFF")
+                        mainHandler.removeCallbacks(connectTimeout)
+                        mainHandler.removeCallbacks(reconnectRunnable)
                         isConnected = false
+                        isConnecting = false
                         servicesReady = false
                         clearPendingWrites()
                         gatt?.close()
                         gatt = null
+                        updateNotification("🔴 Bluetooth OFF")
                     }
 
                     BluetoothAdapter.STATE_ON -> {
@@ -254,12 +287,24 @@ class BleService : Service() {
 
     private fun connect() {
 
-        if (isConnecting) return
+        if (isConnecting || isConnected) return
 
         val addr = deviceAddress ?: return
 
+        mainHandler.removeCallbacks(reconnectRunnable)
+
         val manager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        val device = manager.adapter.getRemoteDevice(addr)
+        val adapter = manager.adapter
+        if (adapter == null || !adapter.isEnabled) {
+            updateNotification("🔴 Bluetooth OFF")
+            return
+        }
+        val device = try {
+            adapter.getRemoteDevice(addr)
+        } catch (e: IllegalArgumentException) {
+            log("Invalid device address: $addr")
+            return
+        }
 
         gatt?.close()
         gatt = null
@@ -271,6 +316,10 @@ class BleService : Service() {
         lastSent = null
         incomingFrameBytes = ByteArray(0)
 
+        updateNotification("🔄 Connexion...")
+        mainHandler.removeCallbacks(connectTimeout)
+        mainHandler.postDelayed(connectTimeout, CONNECT_TIMEOUT_MS)
+
         gatt = device.connectGatt(
             this,
             false,
@@ -279,40 +328,67 @@ class BleService : Service() {
         )
     }
 
+    private fun forceReconnect() {
+        mainHandler.removeCallbacks(connectTimeout)
+        mainHandler.removeCallbacks(reconnectRunnable)
+        isConnected = false
+        isConnecting = false
+        servicesReady = false
+        clearPendingWrites()
+        gatt?.disconnect()
+        gatt?.close()
+        gatt = null
+        connect()
+    }
+
+    private fun handleDisconnected() {
+        mainHandler.removeCallbacks(connectTimeout)
+        isConnected = false
+        isConnecting = false
+        servicesReady = false
+        clearPendingWrites()
+        weekdayHeader = null
+        isAwaitingWeekdayHeader = false
+        mainHandler.removeCallbacks(weekdayHeaderTimeout)
+
+        gatt?.close()
+        gatt = null
+
+        val delay = (RECONNECT_BASE_MS shl reconnectAttempts.coerceAtMost(5))
+            .coerceAtMost(RECONNECT_MAX_MS)
+        reconnectAttempts++
+
+        updateNotification("🔴 Reconnexion...")
+
+        mainHandler.removeCallbacks(reconnectRunnable)
+        mainHandler.postDelayed(reconnectRunnable, delay)
+    }
+
     @SuppressLint("MissingPermission")
     private val gattCallback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
 
-            isConnecting = false
+            if (g !== gatt && gatt != null) {
+                g.close()
+                return
+            }
 
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
+            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                mainHandler.removeCallbacks(connectTimeout)
+                isConnecting = false
                 isConnected = true
                 servicesReady = false
+                reconnectAttempts = 0
                 gatt = g
 
                 g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
                 g.discoverServices()
 
                 updateNotification("🟢 Connecté")
-            }
-
-            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                isConnected = false
-                servicesReady = false
-                clearPendingWrites()
-                weekdayHeader = null
-                isAwaitingWeekdayHeader = false
-                mainHandler.removeCallbacks(weekdayHeaderTimeout)
-
-                gatt?.close()
-                gatt = null
-
-                updateNotification("🔴 Reconnexion...")
-
-                Handler(Looper.getMainLooper()).postDelayed({
-                    connect()
-                }, 3000)
+            } else {
+                log("Disconnected (status=$status, state=$newState)")
+                handleDisconnected()
             }
         }
 
@@ -588,6 +664,8 @@ class BleService : Service() {
     }
 
     private fun updateNotification(text: String) {
+        prefs.edit().putString(STATUS_PREF, text).apply()
+        sendBroadcast(Intent("BLE_STATUS").setPackage(packageName).putExtra("status", text))
         notificationManager.notify(1, createNotification(text))
     }
 

@@ -20,4 +20,6 @@
 
     <string name="inactive">Inactif</string>
     <string name="last_data">Dernière donnée reçue</string>
+    <string name="reconnect">Reconnecter la montre</string>
+    <string name="reconnecting">Reconnexion…</string>
 </resources>

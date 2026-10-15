@@ -23,6 +23,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textView: TextView
     private lateinit var btnPermission: Button
     private lateinit var btnSelectDevice: Button
+    private lateinit var btnReconnect: Button
 
     private var currentStatus: String = ""
 
@@ -82,14 +83,22 @@ class MainActivity : AppCompatActivity() {
             setTextColor(getColor(R.color.app_text))
         }
 
+        btnReconnect = Button(this).apply {
+            text = getString(R.string.reconnect)
+            backgroundTintList = ColorStateList.valueOf(getColor(R.color.app_surface))
+            setTextColor(getColor(R.color.app_text))
+        }
+
         layout.addView(textView)
         layout.addView(btnPermission)
         layout.addView(btnSelectDevice)
+        layout.addView(btnReconnect)
 
         setContentView(layout)
 
         btnPermission.setOnClickListener { requestPermissions() }
         btnSelectDevice.setOnClickListener { showPairedDevices() }
+        btnReconnect.setOnClickListener { reconnectWatch() }
 
         updateUI()
 
@@ -136,6 +145,23 @@ class MainActivity : AppCompatActivity() {
             startForegroundService(intent)
         else
             startService(intent)
+    }
+
+    private fun reconnectWatch() {
+        val addr = getSharedPreferences("data", MODE_PRIVATE)
+            .getString("device_address", null)
+        if (addr == null) {
+            Toast.makeText(this, getString(R.string.no_device), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(this, BleService::class.java)
+            .setAction(BleService.ACTION_RECONNECT)
+            .putExtra("device_address", addr)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            startForegroundService(intent)
+        else
+            startService(intent)
+        Toast.makeText(this, getString(R.string.reconnecting), Toast.LENGTH_SHORT).show()
     }
 
     private fun startBleServiceSafe() {
@@ -188,6 +214,8 @@ class MainActivity : AppCompatActivity() {
 
         val statusText = when {
             currentStatus.isNotEmpty() -> currentStatus
+            prefs.getString(BleService.STATUS_PREF, null) != null ->
+                prefs.getString(BleService.STATUS_PREF, null)!!
             bg != "--" -> getString(R.string.last_data)
             else -> getString(R.string.inactive)
         }
